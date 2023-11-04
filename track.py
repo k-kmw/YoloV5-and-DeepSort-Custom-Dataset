@@ -25,19 +25,22 @@ import boto3
 from botocore.client import Config
 import map
 from dotenv import load_dotenv
-import random
-from weather import check_weather
 
 load_dotenv()
 HLS_PATH = os.environ.get('HLSPATH')
 HLS_OUTPUT = HLS_PATH
+
+# 영상 정보
+video_width = 720
+video_height = 480
+fps = 6
 
 # S3 영상 저장
 ACCESS_KEY_ID = os.environ.get('ACCESS_KEY_ID')
 ACCESS_SECRET_KEY = os.environ.get('ACCESS_SECRET_KEY')
 BUCKET_NAME = 'traffic-inf'
 s3 = ""
-priorFilesCount = 0
+savePeriod = 30
 
 # IoT
 CLIENT_ID = "MyTest"
@@ -64,7 +67,7 @@ countIds = []
 line = []  # x1, y1, x2, y2
 
 # fall detection
-fallIdx = 0
+fallIdx = 1
 fallIds = []
 transmit = False
 transmitFrame = 0
@@ -101,7 +104,7 @@ def handle_upload_img(file, videoType): # f = 파일명 이름.확장자 분리
     data = open(HLS_OUTPUT + file, 'rb')
     # '로컬의 해당파일경로'+ 파일명 + 확장자
     s3.Bucket(BUCKET_NAME).put_object(
-        Key= f'{busNum}/{fallIdx}/{file}', Body=data, ContentType=typ)
+        Key= f'{busNum}/{file}', Body=data, ContentType=typ)
 
 def run_ffmpeg(width, height, fps):
     ffmpg_cmd = [
@@ -114,10 +117,10 @@ def run_ffmpeg(width, height, fps):
         '-r', str(fps),
         '-i', '-',
         '-c:v', 'libx264',  # x264 비디오 코덱 지정
-        '-g', '60',  # 키프레임 간격 설정 (여기서는 10으로 예시로 설정)  
+        '-g', f'{fps*10}',  # 키프레임 간격 설정 (여기서는 10으로 예시로 설정)  
         '-hls_time', '10',
         '-hls_list_size', '10',
-        '-force_key_frames', f'expr:gte(t,n_forced*{60})',  # 키프레임 간격을 맞추기 위한 설정
+        '-force_key_frames', f'expr:gte(t,n_forced*{fps*10})',  # 키프레임 간격을 맞추기 위한 설정
         f'{HLS_OUTPUT}index.m3u8'
     ]
     return subprocess.Popen(ffmpg_cmd, stdin=subprocess.PIPE)
@@ -131,37 +134,37 @@ def createDirectory(directory):
 
 def isFall(track):
     # print('test')
-    if(len(track.height) >= 3):
-        if(track.track_id not in fallIds and ((track.height[-2]/2 > track.height[-1]) 
-                                                or (track.height[-3]/2 > track.height[-1]))):
+    if(len(track.height) >= fps//2):
+        if(track.track_id not in fallIds and ((track.height[fps//2]*0.5 > track.height[-1]) 
+                                                or (track.height[fps//2]*0.5 > track.height[-1]))):
             fallIds.append(track.track_id)
             return True
-    return False
+    return False 
 
 def publish():
     print("PUBLISH!!!!!!!!!!")
 
     address = map.address()            
     if videoType[videoTypeNum] == 'in':
-        message = {"count" : incount, "address" : address}
+        message = {"count" : incount}
         myMQTTClinet.publish(
             topic = f'/{busNum}/in',
             QoS=1,
-            payload= json.dumps(message)
+            payload= json.dumps(message),
         )
     elif videoType[videoTypeNum] == 'out':
-        message = {"count" : outcount, "address" : address}
+        message = {"count" : outcount}
         myMQTTClinet.publish(
-            topic = f'/{busNum}/in', 
+            topic = f'/{busNum}/out', 
             QoS=1,
-            payload= json.dumps(message)
+            payload= json.dumps(message),
         )
     else:
         message = {"address" : address, "accidentNum" : fallIdx}
         myMQTTClinet.publish(
             topic = f'/{busNum}/accident', 
             QoS=1,
-            payload= json.dumps(message)
+            payload= json.dumps(message),
         )
 
 def detect(opt):
@@ -177,6 +180,9 @@ def detect(opt):
     global videoTypeNum
     global line
     global fallIdx
+    global video_width
+    global video_height
+    global fps
     if "in" in source:  # in 이라는 글자가 포함되면 true
         line = [200, 190, 200, 380]
         HLS_OUTPUT = f'hls/{busNum}/{fallIdx}/' # for test 
@@ -184,6 +190,9 @@ def detect(opt):
         videoTypeNum = 1
         line = [200, 190, 200, 280]
     else:
+        video_width = 1280
+        video_height = 720
+        fps = 29
         videoTypeNum = 2
 
     createDirectory(HLS_OUTPUT)
@@ -246,9 +255,9 @@ def detect(opt):
     txt_file_name = source.split('/')[-1].split('.')[0]
     txt_path = str(Path(out)) + '/' + txt_file_name + '.txt'
 
-    # img = next(iter(dataset))[1]
-    # ffmpeg_process = run_ffmpeg(img.shape[0], img.shape[1], 6)
-    # ffmpeg_process = run_ffmpeg(720, 480, 6)
+    priorFilesCount = -1
+    for (root, directories, files) in os.walk(HLS_OUTPUT):
+        priorFilesCount = len(files)
 
     for frame_idx, (path, img, im0s, vid_cap) in enumerate(dataset):
         img = torch.from_numpy(img).to(device)
@@ -282,11 +291,11 @@ def detect(opt):
                 det[:, :4] = scale_coords(
                     img.shape[2:], det[:, :4], im0.shape).round()
 
-                # Print results
-                for c in det[:, -1].unique():
-                    n = (det[:, -1] == c).sum()  # detections per class
-                    # add to string
-                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "
+                # # Print results
+                # for c in det[:, -1].unique():
+                #     n = (det[:, -1] == c).sum()  # detections per class
+                #     # add to string
+                #     s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "
 
                 xywhs = xyxy2xywh(det[:, 0:4])
                 confs = det[:, 4]
@@ -295,65 +304,63 @@ def detect(opt):
                 # pass detections to deepsort
                 outputs = deepsort.update(
                     xywhs.cpu(), confs.cpu(), clss.cpu(), im0)
+                
+                # fall detection
+                if(videoType[videoTypeNum] == 'fall'):
+                    global transmit
+                    global transmitFrame
+                    print("fallIds: ", fallIds)
+                    for track in tracks:
+                        if names[int(track.class_id)] == 'person':
+                            if transmit != True and isFall(track):
+                                HLS_OUTPUT = f'hls/{busNum}/{fallIdx}/'
+                                createDirectory(HLS_OUTPUT)
+                                ffmpeg_process = run_ffmpeg(720, 480, 6)
+                                transmit = True
+                                transmitFrame = 0
+                                fallIdx += 1
+                                break
 
                 # 인원수 카운팅
-                tracks = deepsort.tracker.tracks
-                print('countIds:', countIds)
-                for track in tracks:
-                    # print(track)
-                    global incount
-                    global outcount
-                    if(names[int(track.class_id)] == 'head'): # head를 기준으로 카운트
-                        if(videoType[videoTypeNum] == 'in'):  # in count
-                            if(track.track_id not in countIds and len(track.centroidarr) >= 3
-                            and ((track.centroidarr[-3][0] <= line[0]
-                                    and track.centroidarr[-3][1] >= line[1]
-                                    and track.centroidarr[-1][0] >= line[0]
-                                    and abs(track.centroidarr[-1][0] - track.centroidarr[-3][0]) < 360
-                                    ) or
-                                    (track.centroidarr[-2][0] <= line[0]
-                                    and track.centroidarr[-2][1] <= line[1]
-                                    and track.centroidarr[-1][0] >= line[0]
-                                    and abs(track.centroidarr[-1][0] - track.centroidarr[-2][0]) < 240
-                                    ))
-                            ):
-                                incount += 1
-                                countIds.append(track.track_id)
-                        elif videoType[videoTypeNum] == 'out':  # out count
-                            if(track.track_id not in countIds and len(track.centroidarr) >= 3
-                            and ((track.centroidarr[-3][0] >= line[0]
-                                    and track.centroidarr[-3][1] <= line[3]
-                                    and track.centroidarr[-1][0] <= line[0]
-                                    and abs(track.centroidarr[-1][0] - track.centroidarr[-3][0]) < 360
-                                    ) or
-                                    (track.centroidarr[-2][0] >= line[0]
-                                    and track.centroidarr[-2][1] <= line[3]
-                                    and track.centroidarr[-1][0] <= line[0]
-                                    and abs(track.centroidarr[-1][0] - track.centroidarr[-2][0]) < 240
-                                    ))
-                            ):
-                                outcount += 1
-                                countIds.append(track.track_id)
+                else:
+                    tracks = deepsort.tracker.tracks
+                    print('countIds:', countIds)
+                    for track in tracks:
+                        # print(track)
+                        global incount
+                        global outcount
+                        if(names[int(track.class_id)] == 'head'): # head를 기준으로 카운트
+                            if(videoType[videoTypeNum] == 'in'):  # in count
+                                if(track.track_id not in countIds and len(track.centroidarr) >= 3
+                                and ((track.centroidarr[-3][0] <= line[0]
+                                        and track.centroidarr[-3][1] >= line[1]
+                                        and track.centroidarr[-1][0] >= line[0]
+                                        and abs(track.centroidarr[-1][0] - track.centroidarr[-3][0]) < 360
+                                        ) or
+                                        (track.centroidarr[-2][0] <= line[0]
+                                        and track.centroidarr[-2][1] <= line[1]
+                                        and track.centroidarr[-1][0] >= line[0]
+                                        and abs(track.centroidarr[-1][0] - track.centroidarr[-2][0]) < 240
+                                        ))
+                                ):
+                                    incount += 1
+                                    countIds.append(track.track_id)
+                            elif videoType[videoTypeNum] == 'out':  # out count
+                                if(track.track_id not in countIds and len(track.centroidarr) >= 3
+                                and ((track.centroidarr[-3][0] >= line[0]
+                                        and track.centroidarr[-3][1] <= line[3]
+                                        and track.centroidarr[-1][0] <= line[0]
+                                        and abs(track.centroidarr[-1][0] - track.centroidarr[-3][0]) < 360
+                                        ) or
+                                        (track.centroidarr[-2][0] >= line[0]
+                                        and track.centroidarr[-2][1] <= line[3]
+                                        and track.centroidarr[-1][0] <= line[0]
+                                        and abs(track.centroidarr[-1][0] - track.centroidarr[-2][0]) < 240
+                                        ))
+                                ):
+                                    outcount += 1
+                                    countIds.append(track.track_id)
 
-                # fall detection
-                # if(videoType[videoTypeNum] == 'center'):
-                global transmit
-                global transmitFrame
-                print("fallIds: ", fallIds)
-                for track in tracks:
-                    if names[int(track.class_id)] == 'person':
-                        # r = random.random()
-                        if transmit != True and isFall(track):
-                        # if r < 0.05 and transmit != True:
-                            # fallIds.append(r)
-                            HLS_OUTPUT = f'hls/{busNum}/{fallIdx}/'
-                            createDirectory(HLS_OUTPUT)
-                            ffmpeg_process = run_ffmpeg(720, 480, 6)
-                            transmit = True
-                            transmitFrame = 0
-                            publish()
-                            fallIdx += 1
-                            break
 
                 # draw boxes for visualization
                 if len(outputs) > 0:
@@ -365,8 +372,17 @@ def detect(opt):
 
                         c = int(cls)  # integer class
                         label = f'{id} {names[c]} {conf:.2f}'
-                        annotator.box_label(
-                            bboxes, label, color=colors(c, True))
+                        if names[c] == 'head':
+                            if id not in countIds:
+                                annotator.box_label(bboxes, label, color=(153, 255, 153))
+                            else:
+                                annotator.box_label(bboxes, label, color=(0, 255, 0))
+
+                        if names[c] == 'person':
+                            if id not in fallIds:
+                                annotator.box_label(bboxes, label, color=(204, 204, 255))
+                            else:
+                                annotator.box_label(bboxes, label, color=(0, 0, 255))
 
                         if save_txt:
                             # to MOT format
@@ -393,12 +409,12 @@ def detect(opt):
 
             if videoType[videoTypeNum] == 'in':
                 cv2.line(im0, (line[0], line[1]),
-                        (line[2], line[3]), (255, 0, 0), 5)
+                        (line[2], line[3]), (255, 51, 0), 5)
                 cv2.putText(im0, 'in: %d' % incount, (20, 20 + text_scale),
                             cv2.FONT_HERSHEY_PLAIN, text_scale, (0, 255, 255), thickness=2)
             elif videoType[videoTypeNum] == 'out':
                 cv2.line(im0, (line[0], line[1]),
-                        (line[2], line[3]), (255, 0, 0), 5)
+                        (line[2], line[3]), (255, 51, 0), 5)
                 cv2.putText(im0, 'out: %d' % outcount, (20, 20 + text_scale),
                             cv2.FONT_HERSHEY_PLAIN, text_scale, (0, 255, 255), thickness=2)
 
@@ -419,18 +435,19 @@ def detect(opt):
                     raise StopIteration
                 
             # hls 변환하기 위한 subprocess 생성
-            if transmit and transmitFrame < 180:
+            if transmit and transmitFrame < fps*savePeriod:
+                if transmitFrame == fps * 13:
+                    publish()
                 ffmpeg_process.stdin.write(im0)
                 transmitFrame += 1
 
-            if transmitFrame >= 180:
+            if transmitFrame >= fps*savePeriod:
                 print("finish video")
                 ffmpeg_process.stdin.close()
                 transmitFrame = 0
                 transmit = False
-
-            global priorFilesCount
-            for (root, directories, files) in os.walk(HLS_OUTPUT):  
+            
+            for (root, directories, files) in os.walk(HLS_OUTPUT):
                 if len(files) > 0 and priorFilesCount != len(files):
                     priorFilesCount = len(files)
                     for file in files:
