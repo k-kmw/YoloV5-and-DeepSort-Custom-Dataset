@@ -33,6 +33,13 @@ https://www.youtube.com/watch?v=_uKhF7eF_cQ&list=PLFUP9jG-TDp96chsm66TfMPlAJXIt6
 ```python
 $ pip install -r requirement.txt
 ```
+3. crowdhuman_yolov5m weight 다운로드
+https://drive.google.com/file/d/1gglIwqxaH2iTvy6lZlXuAcMpd_U0GCUb/view
+```
+$ cd yolov5
+$ mkdir weights
+$ mv your_crowdhuman_yolov5m_path ./yolov5/weights
+```
 
 ## 실행 방법
 
